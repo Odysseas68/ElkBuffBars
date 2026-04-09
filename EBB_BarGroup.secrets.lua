@@ -40,9 +40,9 @@ function prototype:MarkPending(flag)
     self[flag] = true
 end
 
-function prototype:IsDebuffOnlyGroup()
+function prototype:IsCombatLiveUpdateGroup()
     local t = self.layout and self.layout.filter and self.layout.filter.type
-    return t and t.DEBUFF and not t.BUFF and not t.TENCH and not t.TRACKING
+    return t and not t.TENCH and not t.TRACKING
 end
 
 function prototype:FlushPending()
@@ -376,6 +376,13 @@ local sorting = {
         local bt = safeComparableTime(b.expirytime)
 
         if at == nil then
+            at = safeComparableTime(a.timemax)
+        end
+        if bt == nil then
+            bt = safeComparableTime(b.timemax)
+        end
+
+        if at == nil then
             if bt ~= nil then
                 return false
             end
@@ -434,11 +441,18 @@ function prototype:UpdateData(updated)
 
     local sortRule = Enum.UnitAuraSortRule.Default
     local sortDirection = Enum.UnitAuraSortDirection.Normal
+
     if self.layout.sorting == "name" then
         sortRule = Enum.UnitAuraSortRule.NameOnly
     elseif self.layout.sorting == "timeleft" then
-        sortRule = Enum.UnitAuraSortRule.ExpirationOnly
-        sortDirection = Enum.UnitAuraSortDirection.Reverse
+        if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
+            -- keep a stable order in combat; ExpirationOnly causes churn with secret/unreadable timers
+            sortRule = Enum.UnitAuraSortRule.Default
+            sortDirection = Enum.UnitAuraSortDirection.Normal
+        else
+            sortRule = Enum.UnitAuraSortRule.ExpirationOnly
+            sortDirection = Enum.UnitAuraSortDirection.Reverse
+        end
     end
 
     if layout.target == "player" then
@@ -449,35 +463,49 @@ function prototype:UpdateData(updated)
         end
     end
 
-    for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
-        if self:CheckFilter(v) then
-            sortmap[v.auraid] = v
-        end
-    end
-    if next(sortmap) then
-        local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HELPFUL", nil, sortRule, sortDirection)
-        for _, v in pairs(auraInstanceIDs) do
-            if sortmap[v] then
-                table_insert(data, sortmap[v])
+    if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
+        for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
+            if self:CheckFilter(v) then
+                table_insert(data, v)
             end
         end
-    end
-    table_wipe(sortmap)
 
-    for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
-        if self:CheckFilter(v) then
-            sortmap[v.auraid] = v
-        end
-    end
-    if next(sortmap) then
-        local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HARMFUL", nil, sortRule, sortDirection)
-        for _, v in pairs(auraInstanceIDs) do
-            if sortmap[v] then
-                table_insert(data, sortmap[v])
+        for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
+            if self:CheckFilter(v) then
+                table_insert(data, v)
             end
         end
+    else
+        for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
+            if self:CheckFilter(v) then
+                sortmap[v.auraid] = v
+            end
+        end
+        if next(sortmap) then
+            local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HELPFUL", nil, sortRule, sortDirection)
+            for _, v in pairs(auraInstanceIDs) do
+                if sortmap[v] then
+                    table_insert(data, sortmap[v])
+                end
+            end
+        end
+        table_wipe(sortmap)
+
+        for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
+            if self:CheckFilter(v) then
+                sortmap[v.auraid] = v
+            end
+        end
+        if next(sortmap) then
+            local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HARMFUL", nil, sortRule, sortDirection)
+            for _, v in pairs(auraInstanceIDs) do
+                if sortmap[v] then
+                    table_insert(data, sortmap[v])
+                end
+            end
+        end
+        table_wipe(sortmap)
     end
-    table_wipe(sortmap)
 
     if layout.target == "player" then
         for _, v in pairs(ElkBuffBars.tenchdata) do
@@ -487,14 +515,24 @@ function prototype:UpdateData(updated)
         end
     end
 
+    if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
+        if self.layout.sorting == "name" and sorting.name then
+            table_sort(data, sorting.name)
+        elseif self.layout.sorting == "timeleft" and sorting.timeleft then
+            table_sort(data, sorting.timeleft)
+        elseif self.layout.sorting == "timemax" and sorting.timemax then
+            table_sort(data, sorting.timemax)
+        end
+    end
+
     if self.layout.configmode then
         table_insert(data, DATA_DEMO)
     end
-    if self.layout.sorting == "timemax" and sorting.timemax then
+    if self.layout.sorting == "timemax" and sorting.timemax and not (InCombatLockdown() and self:IsCombatLiveUpdateGroup()) then
         table_sort(data, sorting.timemax)
     end
 
-    if InCombatLockdown() and not self:IsDebuffOnlyGroup() then
+    if InCombatLockdown() and not self:IsCombatLiveUpdateGroup() then
         self.pendingFullData = false
         self.pendingUpdateBars = true
         return
@@ -505,7 +543,7 @@ end
 
 -- creates bars from data
 function prototype:UpdateBars()
-    if InCombatLockdown() and not self:IsDebuffOnlyGroup() then
+    if InCombatLockdown() and not self:IsCombatLiveUpdateGroup() then
         self:MarkPending("pendingUpdateBars")
         return
     end

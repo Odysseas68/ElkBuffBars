@@ -1189,6 +1189,7 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
     function ElkBuffBars:ScanData_UnitAura(unit, auratype)
         local filter = auratype == "DEBUFF" and "HARMFUL" or "HELPFUL"
         local maxcharges = self.db.global.maxcharges[auratype]
+        local maxtimes = self.db.global.maxtimes[auratype]
         local datatable = auratype == "DEBUFF" and self.debuffdata[unit] or self.buffdata[unit]
         if not datatable then return end
         for k, v in pairs(datatable) do
@@ -1236,13 +1237,29 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
             local expires
             if issecretvalue(expirationTime) then
                 expires = C_UnitAuras.DoesAuraHaveExpirationTime(unit, aura.auraInstanceID)
-                if type(expires) == "nil" then expires = false end -- temporary bugfix for broken API returns
-                -- 12.x: DoesAuraHaveExpirationTime may return a secret boolean; Lua cannot test those.
+                if type(expires) == "nil" then expires = false end
                 if issecretvalue(expires) then
                     expires = true
                 end
             else
                 expires = expirationTime and expirationTime > 0
+            end
+
+            local timemax = duration or 0
+
+            local maxKey = nil
+            if spellId ~= nil and not issecretvalue(spellId) then
+                maxKey = spellId
+            elseif nonSecretName then
+                maxKey = name
+            end
+
+            if maxKey ~= nil and timemax and not issecretvalue(timemax) and timemax > 0 then
+                if maxtimes[maxKey] == nil or maxtimes[maxKey] < timemax then
+                    maxtimes[maxKey] = timemax
+                end
+            elseif maxKey ~= nil and maxtimes[maxKey] then
+                timemax = maxtimes[maxKey]
             end
 
             local dt = GetDataTable()
@@ -1258,7 +1275,7 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
             dt.debufftype       = debuffType
             dt.expires          = expires
             dt.expirytime       = expirationTime
-            dt.timemax          = duration or 0
+            dt.timemax          = timemax
             dt.timeMod          = timeMod or 0 -- (timeMod > 0) and timeMod or 0
             dt.charges          = count
             dt.maxcharges       = nonSecretName and maxcharges[name] or count

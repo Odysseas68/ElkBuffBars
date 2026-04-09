@@ -17,6 +17,8 @@ local string_format			= string.format
 local string_match			= string.match
 local string_utf8len		= string.utf8len
 
+local TIMELEFT_SECRET_PLACEHOLDER = "?"
+
 local issecretvalue = issecretvalue or function() return false end
 -- 12.x: false means addon code must not do arithmetic/compare on the value; pair with issecretvalue.
 local canaccessvalue = canaccessvalue or function() return true end
@@ -84,6 +86,11 @@ local function resolveSafeTimeleft(currentValue, data, duration, elapsed)
             return math_max(0, currentValue - elapsed)
         end
         return currentValue
+    end
+
+    local safeMax = data.timemax
+    if safeMax ~= nil and not issecretvalue(safeMax) and canaccessvalue(safeMax) and safeMax > 0 then
+        return safeMax
     end
 
     return nil
@@ -586,6 +593,22 @@ local updateFunc = function(self, elapsed) self.bar:OnUpdate(elapsed) end
 
 function prototype:UpdateData(data)
     if data then
+        local old = self.data
+        if old then
+            local oldTimed = not issecretvalue(old.expires) and old.expires
+            local newTimed = not issecretvalue(data.expires) and data.expires
+
+            local changedAuraKind =
+                old.realtype ~= data.realtype or
+                oldTimed ~= newTimed
+
+            if changedAuraKind then
+                self.timeleft = nil
+            end
+        else
+            self.timeleft = nil
+        end
+
         self.data = CopyBarData(self.data, data)
     else
         data = self.data
@@ -594,7 +617,7 @@ function prototype:UpdateData(data)
         end
     end
 
-data = self.data
+    data = self.data
 
     local frames = self.frames
     local layout = self.layout
@@ -606,7 +629,9 @@ data = self.data
     end
 
     local resolved = resolveSafeTimeleft(self.timeleft, data, duration)
-    if resolved ~= nil then
+    if not issecretvalue(data.expires) and not data.expires then
+        self.timeleft = nil
+    elseif resolved ~= nil then
         self.timeleft = resolved
     end
 
@@ -856,12 +881,12 @@ local function getTimeFormatClock(timeAmount, timeFraction)
 end
 
 function prototype:GetTimeString(timeAmount, timeFormat, timeFraction)
-    if timeAmount == nil then
-        return "", 0
-    end
-    -- Never boolean-test self.data.expires: it may be a secret boolean from C_UnitAuras.
     local exp = self.data.expires
     if not issecretvalue(exp) and not exp then
+        return "", 0
+    end
+
+    if timeAmount == nil then
         return TIMELEFT_SECRET_PLACEHOLDER, 0
     end
 
