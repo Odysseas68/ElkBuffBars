@@ -337,7 +337,7 @@ local function safeComparableTime(v)
     if issecretvalue and issecretvalue(v) then
         return nil
     end
-    if canaccessvalue and not canaccessvalue(v) then
+    if issecretvalue and issecretvalue(v) and canaccessvalue and not canaccessvalue(v) then
         return nil
     end
     return v
@@ -350,7 +350,7 @@ local function safeComparableString(v)
     if issecretvalue and issecretvalue(v) then
         return ""
     end
-    if canaccessvalue and not canaccessvalue(v) then
+    if issecretvalue and issecretvalue(v) and canaccessvalue and not canaccessvalue(v) then
         return ""
     end
     return v
@@ -430,6 +430,14 @@ local sorting = {
 }
 
 local sortmap = {}
+local function GetSafeAuraInstanceIDs(unit, filter, sortRule, sortDirection)
+    local ok, auraInstanceIDs = pcall(C_UnitAuras.GetUnitAuraInstanceIDs, unit, filter, nil, sortRule, sortDirection)
+    if ok and auraInstanceIDs then
+        return auraInstanceIDs
+    end
+    return nil
+end
+
 -- creates data for which bars will be created
 function prototype:UpdateData(updated)
     if updated and not updated[self.layout.target] then return end
@@ -445,14 +453,8 @@ function prototype:UpdateData(updated)
     if self.layout.sorting == "name" then
         sortRule = Enum.UnitAuraSortRule.NameOnly
     elseif self.layout.sorting == "timeleft" then
-        if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
-            -- keep a stable order in combat; ExpirationOnly causes churn with secret/unreadable timers
-            sortRule = Enum.UnitAuraSortRule.Default
-            sortDirection = Enum.UnitAuraSortDirection.Normal
-        else
-            sortRule = Enum.UnitAuraSortRule.ExpirationOnly
-            sortDirection = Enum.UnitAuraSortDirection.Reverse
-        end
+        sortRule = Enum.UnitAuraSortRule.ExpirationOnly
+        sortDirection = Enum.UnitAuraSortDirection.Reverse
     end
 
     if layout.target == "player" then
@@ -463,49 +465,47 @@ function prototype:UpdateData(updated)
         end
     end
 
-    if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
-        for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
-            if self:CheckFilter(v) then
-                table_insert(data, v)
-            end
+    for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
+        if self:CheckFilter(v) then
+            sortmap[v.auraid] = v
         end
-
-        for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
-            if self:CheckFilter(v) then
-                table_insert(data, v)
-            end
-        end
-    else
-        for _, v in pairs(ElkBuffBars.buffdata[layout.target]) do
-            if self:CheckFilter(v) then
-                sortmap[v.auraid] = v
-            end
-        end
-        if next(sortmap) then
-            local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HELPFUL", nil, sortRule, sortDirection)
-            for _, v in pairs(auraInstanceIDs) do
-                if sortmap[v] then
-                    table_insert(data, sortmap[v])
-                end
-            end
-        end
-        table_wipe(sortmap)
-
-        for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
-            if self:CheckFilter(v) then
-                sortmap[v.auraid] = v
-            end
-        end
-        if next(sortmap) then
-            local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(layout.target, "HARMFUL", nil, sortRule, sortDirection)
-            for _, v in pairs(auraInstanceIDs) do
-                if sortmap[v] then
-                    table_insert(data, sortmap[v])
-                end
-            end
-        end
-        table_wipe(sortmap)
     end
+    if next(sortmap) then
+        local auraInstanceIDs = GetSafeAuraInstanceIDs(layout.target, "HELPFUL", sortRule, sortDirection)
+        if auraInstanceIDs then
+            for _, v in pairs(auraInstanceIDs) do
+                if sortmap[v] then
+                    table_insert(data, sortmap[v])
+                end
+            end
+        else
+            for _, v in pairs(sortmap) do
+                table_insert(data, v)
+            end
+        end
+    end
+    table_wipe(sortmap)
+
+    for _, v in pairs(ElkBuffBars.debuffdata[layout.target]) do
+        if self:CheckFilter(v) then
+            sortmap[v.auraid] = v
+        end
+    end
+    if next(sortmap) then
+        local auraInstanceIDs = GetSafeAuraInstanceIDs(layout.target, "HARMFUL", sortRule, sortDirection)
+        if auraInstanceIDs then
+            for _, v in pairs(auraInstanceIDs) do
+                if sortmap[v] then
+                    table_insert(data, sortmap[v])
+                end
+            end
+        else
+            for _, v in pairs(sortmap) do
+                table_insert(data, v)
+            end
+        end
+    end
+    table_wipe(sortmap)
 
     if layout.target == "player" then
         for _, v in pairs(ElkBuffBars.tenchdata) do
@@ -515,14 +515,8 @@ function prototype:UpdateData(updated)
         end
     end
 
-    if InCombatLockdown() and self:IsCombatLiveUpdateGroup() then
-        if self.layout.sorting == "name" and sorting.name then
-            table_sort(data, sorting.name)
-        elseif self.layout.sorting == "timeleft" and sorting.timeleft then
-            table_sort(data, sorting.timeleft)
-        elseif self.layout.sorting == "timemax" and sorting.timemax then
-            table_sort(data, sorting.timemax)
-        end
+    if InCombatLockdown() and self:IsCombatLiveUpdateGroup() and self.layout.sorting == "timemax" and sorting.timemax then
+        table_sort(data, sorting.timemax)
     end
 
     if self.layout.configmode then
@@ -600,8 +594,8 @@ function prototype:CheckFilter(data)
 
     if filter.selfcast then
         local ismine
-        if data.raw and data.raw.sourceUnit then
-            local source = data.raw.sourceUnit
+        local source = data.raw and data.raw.sourceUnit
+        if source ~= nil and ((issecretvalue and issecretvalue(source)) ~= true or not canaccessvalue or canaccessvalue(source)) then
             ismine = UnitIsUnit(source, "player") or UnitIsUnit(source, "pet") or UnitIsUnit(source, "vehicle")
         else
             ismine = data.ismine

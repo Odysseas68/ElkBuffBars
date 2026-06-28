@@ -47,6 +47,45 @@ local GetItemInfo               = GetItemInfo
 local GetWeaponEnchantInfo      = GetWeaponEnchantInfo
 
 local issecretvalue = issecretvalue or function() return false end
+local canaccessvalue = canaccessvalue or function() return true end
+
+local function CanReadValue(value)
+    if value == nil then
+        return false
+    end
+    if issecretvalue(value) then
+        return canaccessvalue(value)
+    end
+    return true
+end
+
+local function CanReadNumber(value)
+    return CanReadValue(value) and type(value) == "number"
+end
+
+local function DoesAuraHaveExpirationTime(unit, auraInstanceID)
+    local ok, expires = pcall(C_UnitAuras.DoesAuraHaveExpirationTime, unit, auraInstanceID)
+    if ok and CanReadValue(expires) then
+        return expires
+    end
+    return true
+end
+
+local function GetAuraIconTexture(texture, spellId, previous)
+    if texture ~= nil then
+        return texture
+    end
+    if previous and previous.icon then
+        return previous.icon
+    end
+    if CanReadValue(spellId) and C_Spell and C_Spell.GetSpellTexture then
+        local ok, spellTexture = pcall(C_Spell.GetSpellTexture, spellId)
+        if ok and CanReadValue(spellTexture) then
+            return spellTexture
+        end
+    end
+    return [[Interface\Icons\INV_Misc_QuestionMark]]
+end
 
 local isTrackingDisabled = (C_GameModeManager and C_GameModeManager.IsFeatureEnabled and not C_GameModeManager.IsFeatureEnabled(Enum.GameModeFeatureSetting.InGameTracking))
                         or (C_GameRules and C_GameRules.IsGameRuleActive and C_GameRules.IsGameRuleActive(Enum.GameRule.IngameTrackingDisabled))
@@ -1192,7 +1231,27 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
         local maxtimes = self.db.global.maxtimes[auratype]
         local datatable = auratype == "DEBUFF" and self.debuffdata[unit] or self.buffdata[unit]
         if not datatable then return end
+        local previousData = {}
         for k, v in pairs(datatable) do
+            if v.auraid then
+                previousData[v.auraid] = {
+                    spellid = v.spellid,
+                    name = v.name,
+                    realname = v.realname,
+                    debufftype = v.debufftype,
+                    expires = v.expires,
+                    expirytime = v.expirytime,
+                    timemax = v.timemax,
+                    timeMod = v.timeMod,
+                    charges = v.charges,
+                    maxcharges = v.maxcharges,
+                    icon = v.icon,
+                    ismine = v.ismine,
+                    casterName = v.casterName,
+                    casterClass = v.casterClass,
+                    canStealOrPurge = v.canStealOrPurge,
+                }
+            end
             RecycleDataTable(v)
             datatable[k] = nil
         end
@@ -1223,38 +1282,38 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
             local isCastByPlayer = aura.isFromPlayerOrPlayerPet
             local nameplateShowAll = aura.nameplateShowAll
             local timeMod = aura.timeMod
+            local previous = previousData[aura.auraInstanceID]
 
-            if not texture then break end
-
-            local nonSecretName = not issecretvalue(name)
-            if nonSecretName then
+            local canUseNameAsKey = name ~= nil and not issecretvalue(name)
+            local canReadCount = CanReadNumber(count)
+            if canUseNameAsKey then
                 self:AddKnownName(auratype, name)
-                if count > 1 and (not maxcharges[name] or maxcharges[name] < count) then
+                if canReadCount and count > 1 and (not maxcharges[name] or maxcharges[name] < count) then
                     maxcharges[name] = count
                 end
             end
 
             local expires
-            if issecretvalue(expirationTime) then
-                expires = C_UnitAuras.DoesAuraHaveExpirationTime(unit, aura.auraInstanceID)
-                if type(expires) == "nil" then expires = false end
-                if issecretvalue(expires) then
-                    expires = true
+            if not CanReadValue(expirationTime) then
+                if previous and previous.expires ~= nil then
+                    expires = previous.expires
+                else
+                    expires = DoesAuraHaveExpirationTime(unit, aura.auraInstanceID)
                 end
             else
                 expires = expirationTime and expirationTime > 0
             end
 
-            local timemax = duration or 0
+            local timemax = CanReadNumber(duration) and duration or (previous and previous.timemax) or 0
 
             local maxKey = nil
-            if spellId ~= nil and not issecretvalue(spellId) then
+            if CanReadValue(spellId) then
                 maxKey = spellId
-            elseif nonSecretName then
+            elseif canUseNameAsKey then
                 maxKey = name
             end
 
-            if maxKey ~= nil and timemax and not issecretvalue(timemax) and timemax > 0 then
+            if maxKey ~= nil and timemax > 0 then
                 if maxtimes[maxKey] == nil or maxtimes[maxKey] < timemax then
                     maxtimes[maxKey] = timemax
                 end
@@ -1262,31 +1321,33 @@ if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
                 timemax = maxtimes[maxKey]
             end
 
-            local dt = GetDataTable()
-            dt.index            = i
-            dt.auraid           = aura.auraInstanceID
-            dt.spellid          = spellId
-            dt.name             = nonSecretName and self.db.profile.nameoverride[auratype][name] or name
-            dt.realname         = name
-            dt.rank             = nil
-            --dt.type             = nonSecretName and self.db.profile.typeoverride[auratype][name] or auratype
-            dt.type             = auratype
-            dt.realtype         = auratype
-            dt.debufftype       = debuffType
-            dt.expires          = expires
-            dt.expirytime       = expirationTime
-            dt.timemax          = timemax
-            dt.timeMod          = timeMod or 0 -- (timeMod > 0) and timeMod or 0
-            dt.charges          = count
-            dt.maxcharges       = nonSecretName and maxcharges[name] or count
-            dt.icon             = texture
-            dt.ismine           = aura.isFromPlayerOrPlayerPet -- unitCaster and selfcast[unitCaster] and true or false
-            dt.casterName       = unitCaster and not issecretvalue(unitCaster) and GetUnitName(unitCaster, true) or UNKNOWN
-            dt.casterClass      = unitCaster and not issecretvalue(unitCaster) and (UnitClassBase(unitCaster)) or ""
-            dt.canStealOrPurge  = canStealOrPurge
-            dt.raw              = aura
+            if not (CanReadNumber(expirationTime) and expirationTime > 0 and expirationTime <= GetTime()) then
+                local dt = GetDataTable()
+                dt.index            = i
+                dt.auraid           = aura.auraInstanceID
+                dt.spellid          = CanReadValue(spellId) and spellId or (previous and previous.spellid) or nil
+                dt.name             = canUseNameAsKey and self.db.profile.nameoverride[auratype][name] or name or (previous and previous.name) or UNKNOWN
+                dt.realname         = name or (previous and previous.realname) or UNKNOWN
+                dt.rank             = nil
+                --dt.type             = canUseNameAsKey and self.db.profile.typeoverride[auratype][name] or auratype
+                dt.type             = auratype
+                dt.realtype         = auratype
+                dt.debufftype       = CanReadValue(debuffType) and debuffType or (previous and previous.debufftype) or nil
+                dt.expires          = expires
+                dt.expirytime       = CanReadValue(expirationTime) and expirationTime or (previous and previous.expirytime) or nil
+                dt.timemax          = timemax
+                dt.timeMod          = CanReadNumber(timeMod) and timeMod or (previous and previous.timeMod) or 0 -- (timeMod > 0) and timeMod or 0
+                dt.charges          = canReadCount and count or (previous and previous.charges) or 0
+                dt.maxcharges       = canUseNameAsKey and maxcharges[name] or (canReadCount and count or (previous and previous.maxcharges) or 0)
+                dt.icon             = GetAuraIconTexture(texture, spellId, previous)
+                dt.ismine           = CanReadValue(isCastByPlayer) and isCastByPlayer or (previous and previous.ismine) or false -- unitCaster and selfcast[unitCaster] and true or false
+                dt.casterName       = CanReadValue(unitCaster) and GetUnitName(unitCaster, true) or (previous and previous.casterName) or UNKNOWN
+                dt.casterClass      = CanReadValue(unitCaster) and (UnitClassBase(unitCaster)) or (previous and previous.casterClass) or ""
+                dt.canStealOrPurge  = CanReadValue(canStealOrPurge) and canStealOrPurge or (previous and previous.canStealOrPurge) or false
+                dt.raw              = aura
 
-            table_insert(datatable, dt)
+                table_insert(datatable, dt)
+            end
             i = i + 1
         end
         scan_happened[unit] = true

@@ -18,6 +18,9 @@ local string_match			= string.match
 local string_utf8len		= string.utf8len
 
 local TIMELEFT_SECRET_PLACEHOLDER = "?"
+local dispelColorCurve
+local timeleftCache = {}
+local timeleftIdentityCache = {}
 
 local issecretvalue = issecretvalue or function() return false end
 -- 12.x: false means addon code must not do arithmetic/compare on the value; pair with issecretvalue.
@@ -29,10 +32,133 @@ local function timeAmountMustUseBlizzardFormatter(t)
         return true
     end
     if issecretvalue(t) then
+        return not canaccessvalue(t)
+    end
+    return false
+end
+
+local function canReadValue(value)
+    if value == nil then
+        return false
+    end
+    if issecretvalue(value) then
+        return canaccessvalue(value)
+    end
+    return true
+end
+
+local function getSafeAuraApplicationDisplayCount(unit, auraid)
+    local ok, count = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, auraid)
+    if ok and canReadValue(count) and count ~= "" then
+        return count
+    end
+    return nil
+end
+
+local function getSafeAuraDispelTypeColor(unit, auraid)
+    local ok, color = pcall(C_UnitAuras.GetAuraDispelTypeColor, unit, auraid, dispelColorCurve)
+    if ok and canReadValue(color) then
+        return color
+    end
+    return nil
+end
+
+local function getSafeAuraDuration(unit, auraid)
+    local ok, duration = pcall(C_UnitAuras.GetAuraDuration, unit, auraid)
+    if ok and canReadValue(duration) then
+        return duration
+    end
+    return nil
+end
+
+local function getTimeleftCacheKey(unit, auraid)
+    if not unit or not auraid then
+        return nil
+    end
+    return unit..":"..auraid
+end
+
+local function getTimeleftIdentityKey(unit, data)
+    if not unit or not data then
+        return nil
+    end
+    if data.spellid and not issecretvalue(data.spellid) then
+        return unit..":spell:"..data.spellid
+    end
+    if data.realname and not issecretvalue(data.realname) then
+        return unit..":name:"..data.realtype..":"..data.realname
+    end
+    return nil
+end
+
+local function readCachedTimeleft(cache, key, data)
+    local cached = key and cache[key]
+    if not cached then
+        return nil
+    end
+
+    if cached.timemax and data and canReadValue(data.timemax) and data.timemax > 0 and cached.timemax ~= data.timemax then
+        cache[key] = nil
+        return nil
+    end
+
+    local elapsed = GetTime() - cached.updatedAt
+    if cached.timeleft and cached.timeleft > 0 and elapsed <= cached.timeleft + 1 then
+        return math_max(0, cached.timeleft - elapsed)
+    end
+
+    cache[key] = nil
+    return nil
+end
+
+local function getCachedTimeleft(unit, data)
+    if not data then
+        return nil
+    end
+
+    local key = getTimeleftCacheKey(unit, data.auraid)
+    local cached = readCachedTimeleft(timeleftCache, key, data)
+    if cached ~= nil then
+        return cached
+    end
+
+    key = getTimeleftIdentityKey(unit, data)
+    return readCachedTimeleft(timeleftIdentityCache, key, data)
+end
+
+local function writeCachedTimeleft(cache, key, timeleft, timemax)
+    if not key then
+        return
+    end
+    cache[key] = {
+        timeleft = timeleft,
+        timemax = timemax,
+        updatedAt = GetTime(),
+    }
+end
+
+local function setCachedTimeleft(unit, data, timeleft)
+    if not data or not timeleft or timeleft <= 0 then
+        return
+    end
+
+    local timemax = canReadValue(data.timemax) and data.timemax or nil
+    local key = getTimeleftCacheKey(unit, data.auraid)
+    writeCachedTimeleft(timeleftCache, key, timeleft, timemax)
+
+    key = getTimeleftIdentityKey(unit, data)
+    writeCachedTimeleft(timeleftIdentityCache, key, timeleft, timemax)
+end
+
+local function isSameAuraData(old, new)
+    if old.auraid and new.auraid and old.auraid == new.auraid then
         return true
     end
-    if not canaccessvalue(t) then
-        return true
+    if old.spellid and new.spellid and not issecretvalue(old.spellid) and not issecretvalue(new.spellid) then
+        return old.spellid == new.spellid
+    end
+    if old.realname and new.realname and not issecretvalue(old.realname) and not issecretvalue(new.realname) then
+        return old.realtype == new.realtype and old.realname == new.realname
     end
     return false
 end
@@ -42,10 +168,7 @@ local function getSafeTimeleftFromExpiry(data)
     if expiry == nil then
         return nil
     end
-    if issecretvalue(expiry) then
-        return nil
-    end
-    if not canaccessvalue(expiry) then
+    if not canReadValue(expiry) then
         return nil
     end
 
@@ -63,7 +186,7 @@ local function resolveSafeTimeleft(currentValue, data, duration, elapsed)
 
     if duration then
         local remaining = duration:GetRemainingDuration()
-        if remaining ~= nil and not issecretvalue(remaining) and canaccessvalue(remaining) then
+        if canReadValue(remaining) then
             if remaining > 0 then
                 return remaining
             end
@@ -89,7 +212,7 @@ local function resolveSafeTimeleft(currentValue, data, duration, elapsed)
     end
 
     local safeMax = data.timemax
-    if safeMax ~= nil and not issecretvalue(safeMax) and canaccessvalue(safeMax) and safeMax > 0 then
+    if canReadValue(safeMax) and safeMax > 0 then
         return safeMax
     end
 
@@ -122,7 +245,7 @@ local DEBUFF_DISPLAY_COLOR_INFO = {
     [9] = DEBUFF_TYPE_BLEED_COLOR, -- enrage
     [11] = DEBUFF_TYPE_BLEED_COLOR,
 }
-local dispelColorCurve = C_CurveUtil.CreateColorCurve()
+dispelColorCurve = C_CurveUtil.CreateColorCurve()
 dispelColorCurve:SetType(Enum.LuaCurveType.Step)
 for i, c in pairs(DEBUFF_DISPLAY_COLOR_INFO) do
     dispelColorCurve:AddPoint(i, c)
@@ -146,6 +269,7 @@ function prototype:Reset()
     self.layout = nil
     self.data = nil
     self.timeleft = nil
+    self.duration = nil
     self:SetParent()
 end
 
@@ -292,12 +416,15 @@ function prototype:OnUpdate(elapsed)
 
     local duration
     if data.auraid and data.expires then
-        duration = C_UnitAuras.GetAuraDuration(self.parent.layout.target, data.auraid)
+        duration = getSafeAuraDuration(self.parent.layout.target, data.auraid)
     end
+    self.duration = duration
 
-    local resolved = resolveSafeTimeleft(self.timeleft, data, duration, elapsed)
+    local cachedTimeleft = getCachedTimeleft(self.parent.layout.target, data)
+    local resolved = resolveSafeTimeleft(self.timeleft or cachedTimeleft, data, duration, elapsed)
     if resolved ~= nil then
         self.timeleft = resolved
+        setCachedTimeleft(self.parent.layout.target, data, resolved)
     end
     self:UpdateTimeleft()
 
@@ -305,14 +432,14 @@ function prototype:OnUpdate(elapsed)
         local canUseDurationObject = false
         if duration then
             local remaining = duration:GetRemainingDuration()
-            canUseDurationObject = remaining ~= nil and not issecretvalue(remaining) and canaccessvalue(remaining)
+            canUseDurationObject = canReadValue(remaining)
         end
 
         if canUseDurationObject then
             frames.bar:SetTimerDuration(duration, nil, Enum.StatusBarTimerDirection.RemainingTime)
         else
             local safeMax = data.timemax
-            if safeMax ~= nil and not issecretvalue(safeMax) and canaccessvalue(safeMax) and safeMax > 0 and self.timeleft ~= nil then
+            if canReadValue(safeMax) and safeMax > 0 and self.timeleft ~= nil then
                 frames.bar:SetMinMaxValues(0, safeMax)
                 frames.bar:SetValue(self.timeleft)
             end
@@ -600,7 +727,8 @@ function prototype:UpdateData(data)
 
             local changedAuraKind =
                 old.realtype ~= data.realtype or
-                oldTimed ~= newTimed
+                oldTimed ~= newTimed or
+                not isSameAuraData(old, data)
 
             if changedAuraKind then
                 self.timeleft = nil
@@ -625,14 +753,17 @@ function prototype:UpdateData(data)
 
     local duration
     if data.auraid and data.expires then
-        duration = C_UnitAuras.GetAuraDuration(unit, data.auraid)
+        duration = getSafeAuraDuration(unit, data.auraid)
     end
+    self.duration = duration
 
-    local resolved = resolveSafeTimeleft(self.timeleft, data, duration)
+    local cachedTimeleft = getCachedTimeleft(unit, data)
+    local resolved = resolveSafeTimeleft(self.timeleft or cachedTimeleft, data, duration)
     if not issecretvalue(data.expires) and not data.expires then
         self.timeleft = nil
     elseif resolved ~= nil then
         self.timeleft = resolved
+        setCachedTimeleft(unit, data, resolved)
     end
 
     if layout.icon then
@@ -647,7 +778,7 @@ function prototype:UpdateData(data)
             frames.iconborder:SetTexture("Interface\\Buttons\\UI-Debuff-Overlays")
             frames.iconborder:SetTexCoord(0.296875, 0.5703125, 0, 0.515625)
             if data.auraid and data.expires then
-                local debuffcolor = C_UnitAuras.GetAuraDispelTypeColor(unit, data.auraid, dispelColorCurve) or DEBUFF_TYPE_NONE_COLOR
+                local debuffcolor = getSafeAuraDispelTypeColor(unit, data.auraid) or DEBUFF_TYPE_NONE_COLOR
                 frames.iconborder:SetVertexColor(debuffcolor:GetRGBA())
             else
                 local debuffcolor = DEBUFF_TYPE_NONE_COLOR
@@ -665,8 +796,13 @@ function prototype:UpdateData(data)
         end
         if layout.iconcount then
             if data.auraid then
-                frames.iconcount:SetText(C_UnitAuras.GetAuraApplicationDisplayCount(unit, data.auraid))
-                frames.iconcount:Show()
+                local count = getSafeAuraApplicationDisplayCount(unit, data.auraid)
+                if count then
+                    frames.iconcount:SetText(count)
+                    frames.iconcount:Show()
+                else
+                    frames.iconcount:Hide()
+                end
             elseif data.maxcharges and data.charges and data.charges > 0 then
                 frames.iconcount:SetText(data.charges)
                 frames.iconcount:Show()
@@ -686,14 +822,14 @@ function prototype:UpdateData(data)
             local canUseDurationObject = false
             if duration then
                 local remaining = duration:GetRemainingDuration()
-                canUseDurationObject = remaining ~= nil and not issecretvalue(remaining) and canaccessvalue(remaining)
+                canUseDurationObject = canReadValue(remaining)
             end
 
             if canUseDurationObject then
                 frames.bar:SetTimerDuration(duration, nil, Enum.StatusBarTimerDirection.RemainingTime)
             else
                 local safeMax = data.timemax
-                if safeMax ~= nil and not issecretvalue(safeMax) and canaccessvalue(safeMax) and safeMax > 0 and self.timeleft ~= nil then
+                if canReadValue(safeMax) and safeMax > 0 and self.timeleft ~= nil then
                     frames.bar:SetMinMaxValues(0, safeMax)
                     frames.bar:SetValue(self.timeleft)
                 end
@@ -706,7 +842,7 @@ function prototype:UpdateData(data)
         local barcolorR, barcolorG, barcolorB, barcolorA = unpack(layout["barcolor"])
         if data.type == "DEBUFF" and layout.debufftypecolor then
             if data.auraid then
-                local debuffcolor = C_UnitAuras.GetAuraDispelTypeColor(unit, data.auraid, dispelColorCurve) or DEBUFF_TYPE_NONE_COLOR
+                local debuffcolor = getSafeAuraDispelTypeColor(unit, data.auraid) or DEBUFF_TYPE_NONE_COLOR
                 barcolorR, barcolorG, barcolorB = debuffcolor:GetRGBA()
             else
                 local debuffcolor = DEBUFF_TYPE_NONE_COLOR
@@ -820,7 +956,7 @@ function prototype:GetDataString(datatype)
     if datatype == "COUNT" then return charges end
     if datatype == "TIMELEFT" then
         local fmt, a, b, c = self:GetTimeString(self.timeleft, self.layout.timeformat, self.layout.timeFraction)
-        if fmt == nil or fmt == "" then
+        if fmt == nil or (not issecretvalue(fmt) and fmt == "") then
             return ""
         end
         if a ~= nil then
@@ -880,6 +1016,109 @@ local function getTimeFormatClock(timeAmount, timeFraction)
     end
 end
 
+local durationFormatters = {}
+local function getDurationFormatter(timeFormat, timeFraction)
+    if not C_StringUtil or not C_StringUtil.CreateNumericRuleFormatter then
+        return nil
+    end
+
+    local key = timeFormat..":"..(timeFraction and "1" or "0")
+    if durationFormatters[key] then
+        return durationFormatters[key]
+    end
+
+    local formatter = C_StringUtil.CreateNumericRuleFormatter()
+    if timeFormat == "DEFAULT" then
+        formatter:SetBreakpoints({
+            { threshold = 0, format = SECOND_ONELETTER_ABBR },
+            {
+                threshold = SECONDS_PER_MIN * 1.5,
+                format = MINUTE_ONELETTER_ABBR,
+                step = SECONDS_PER_MIN,
+                rounding = Enum.NumericRuleFormatRounding.Up,
+                components = { { div = SECONDS_PER_MIN } },
+            },
+            {
+                threshold = SECONDS_PER_HOUR * 1.5,
+                format = HOUR_ONELETTER_ABBR,
+                step = SECONDS_PER_HOUR,
+                rounding = Enum.NumericRuleFormatRounding.Up,
+                components = { { div = SECONDS_PER_HOUR } },
+            },
+            {
+                threshold = SECONDS_PER_DAY * 1.5,
+                format = DAY_ONELETTER_ABBR,
+                step = SECONDS_PER_DAY,
+                rounding = Enum.NumericRuleFormatRounding.Up,
+                components = { { div = SECONDS_PER_DAY } },
+            },
+        })
+    elseif timeFormat == "CLOCK" then
+        formatter:SetBreakpoints({
+            { threshold = 0, format = timeFraction and "%.1fs" or "%ds" },
+            {
+                threshold = SECONDS_PER_MIN,
+                format = "%d:%02d",
+                components = {
+                    { div = SECONDS_PER_MIN },
+                    { mod = SECONDS_PER_MIN },
+                },
+            },
+            {
+                threshold = SECONDS_PER_HOUR,
+                format = "%d:%02d:%02d",
+                components = {
+                    { div = SECONDS_PER_HOUR },
+                    { div = SECONDS_PER_MIN, mod = 60 },
+                    { mod = SECONDS_PER_MIN },
+                },
+            },
+        })
+    elseif timeFormat == "CONDENSED" then
+        formatter:SetBreakpoints({
+            { threshold = 0, format = timeFraction and "%.1fs" or "%ds" },
+            {
+                threshold = SECONDS_PER_MIN,
+                format = "%dm %ds",
+                components = {
+                    { div = SECONDS_PER_MIN },
+                    { mod = SECONDS_PER_MIN },
+                },
+            },
+            {
+                threshold = SECONDS_PER_HOUR,
+                format = "%dh %dm",
+                components = {
+                    { div = SECONDS_PER_HOUR },
+                    { div = SECONDS_PER_MIN, mod = 60 },
+                },
+            },
+        })
+    else
+        return nil
+    end
+
+    durationFormatters[key] = formatter
+    return formatter
+end
+
+local function formatDurationObject(duration, timeFormat, timeFraction)
+    if not duration or not duration.FormatRemainingDuration then
+        return nil
+    end
+
+    local formatter = getDurationFormatter(timeFormat, timeFraction)
+    if not formatter then
+        return nil
+    end
+
+    local ok, formatted = pcall(duration.FormatRemainingDuration, duration, formatter)
+    if ok and formatted ~= nil then
+        return formatted
+    end
+    return nil
+end
+
 function prototype:GetTimeString(timeAmount, timeFormat, timeFraction)
     local exp = self.data.expires
     if not issecretvalue(exp) and not exp then
@@ -887,11 +1126,19 @@ function prototype:GetTimeString(timeAmount, timeFormat, timeFraction)
     end
 
     if timeAmount == nil then
+        local formattedDuration = formatDurationObject(self.duration, timeFormat, timeFraction)
+        if formattedDuration then
+            return formattedDuration
+        end
         return TIMELEFT_SECRET_PLACEHOLDER, 0
     end
 
     -- Opaque seconds: no Lua math and no SecondsToTimeAbbrev (it compares secrets internally).
     if timeAmountMustUseBlizzardFormatter(timeAmount) then
+        local formattedDuration = formatDurationObject(self.duration, timeFormat, timeFraction)
+        if formattedDuration then
+            return formattedDuration
+        end
         return TIMELEFT_SECRET_PLACEHOLDER, 0
     end
 
@@ -950,13 +1197,14 @@ function prototype:UpdateTimeleft()
     local layout = self.layout
 
     local fmt, a, b, c = self:GetTimeString(self.timeleft, layout.timeformat, layout.timeFraction)
-    local textAlpha = (fmt ~= nil and fmt ~= "") and 1 or 0
+    local hasText = fmt ~= nil and (issecretvalue(fmt) or fmt ~= "")
+    local textAlpha = hasText and 1 or 0
 
     local function ApplyTime(fs)
         if not fs then
             return
         end
-        if not fmt or fmt == "" then
+        if not hasText then
             fs:SetText("")
             fs:SetAlpha(0)
             return

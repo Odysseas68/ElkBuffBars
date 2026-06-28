@@ -11,11 +11,15 @@ notes.txt
 gemini-notes.txt
 chatgpt_notes.txt
 GPT_notes.txt
+CLAUDE.md
 
 # IDE and Editor Folders (Keeps your personal VS Code settings private)
 .vscode/
 .idea/
+.agents/
+.codex/
 /Scripts/
+/_RetailTestAddon/
 *.sublime-workspace
 *.code-workspace
 
